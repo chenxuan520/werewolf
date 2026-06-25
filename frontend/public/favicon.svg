@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <defs>
+    <linearGradient id="bg" x1="8" y1="6" x2="55" y2="58" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#1C2F63"/>
+      <stop offset="1" stop-color="#090F1E"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(45 16) rotate(90) scale(16 16)">
+      <stop stop-color="#FFF2C2" stop-opacity="0.95"/>
+      <stop offset="1" stop-color="#FFF2C2" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="wolf" x1="19" y1="18" x2="45" y2="51" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#101B37"/>
+      <stop offset="1" stop-color="#050A14"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="3" y="3" width="58" height="58" rx="16" fill="url(#bg)"/>
+  <circle cx="45" cy="16" r="15" fill="url(#glow)"/>
+  <circle cx="43" cy="16" r="11" fill="#FFE6A0"/>
+  <circle cx="48" cy="13" r="10" fill="#1A2956"/>
+
+  <path d="M18 47L22.4 23.5L29.1 30.5L34 18L38.9 30.5L45.6 23.5L50 47L40.8 40.8L34 52L27.2 40.8L18 47Z" fill="url(#wolf)"/>
+  <path d="M18 47L22.4 23.5L29.1 30.5L34 18L38.9 30.5L45.6 23.5L50 47L40.8 40.8L34 52L27.2 40.8L18 47Z" stroke="#FFFFFF" stroke-opacity="0.16" stroke-width="1.4" stroke-linejoin="round"/>
+
+  <path d="M30.1 37.4L26.6 41.3L30.4 41.9L32.1 39.2L30.1 37.4Z" fill="#C24B5A"/>
+  <path d="M37.9 37.4L35.9 39.2L37.6 41.9L41.4 41.3L37.9 37.4Z" fill="#C24B5A"/>
+
+  <circle cx="30.3" cy="38.8" r="1.2" fill="#FFB9B9"/>
+  <circle cx="37.7" cy="38.8" r="1.2" fill="#FFB9B9"/>
+</svg>

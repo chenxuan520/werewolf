@@ -1,0 +1,35 @@
+# 本地真实配置请放到 config/ai-presets.yaml（已加入 .gitignore）。
+# 下面是最小可运行模板，直接替换成你自己的 endpoint / token / model。
+presets:
+  - id: gpt-5-4
+    name: GPT-5.4
+    endpoint: https://llmbox-global.byteintl.net/v1
+    token: replace-with-your-token
+    model: gpt-5.4
+    structured_output: tool_call
+    system_prompt: ""
+
+  - id: glm-5-1
+    name: GLM-5.1
+    endpoint: https://llmbox-global.byteintl.net/v1
+    token: replace-with-your-token
+    model: glm-5.1
+    structured_output: json_object
+    system_prompt: ""
+    max_tokens: 512
+    extra_body:
+      reasoning_effort: none
+    extra_headers:
+      X-Source: ttadk
+
+  - id: deepseek-v4-pro
+    name: Deepseek-V4-Pro
+    endpoint: https://llmbox-global.byteintl.net/v1
+    token: replace-with-your-token
+    model: deepseek-v4-pro
+    structured_output: tool_call
+    system_prompt: ""
+    max_tokens: 512
+    extra_body:
+      thinking:
+        type: disabled

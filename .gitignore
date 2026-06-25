@@ -1,0 +1,9 @@
+.opencode/
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/tsconfig.app.tsbuildinfo
+backend/.cache/
+data/
+config/ai-presets.yaml
+.DS_Store

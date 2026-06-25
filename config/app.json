@@ -1,0 +1,12 @@
+{
+  "backend": {
+    "port": 18131,
+    "dataPath": "../data/werewolf-live.json",
+    "presetsPath": "ai-presets.yaml"
+  },
+  "frontend": {
+    "host": "127.0.0.1",
+    "port": 5174,
+    "apiTarget": "http://127.0.0.1:18131"
+  }
+}
