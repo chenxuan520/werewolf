@@ -222,4 +222,23 @@
     - 还没把 werewolf 的回放内容压到和 holdem 一样精炼（现在已有步骤控制，但 feed 仍偏事件流）。
     - 仍需继续做一次完整的 MCP 视觉回归，确认所有按钮在 dev server 重启后状态稳定。
 
+- 2026-06-25 10:48：创建 public GitHub 仓库并完成首次推送。
+  - 做了什么：
+    - 检查当前仓库状态、忽略规则和最近计划记录，确认 `config/ai-presets.yaml` 仍被 `.gitignore` 排除，没有把本地真实 token 一起提交。
+    - 提交当前代码为首个 git commit：`feat: bootstrap werewolf workbench`。
+    - 使用 `gh repo create chenxuan520/werewolf --public --source=. --remote=origin --push` 创建远端并推送当前分支。
+  - 改了哪些文件：
+    - `.agents/plans/2026-06-23-ai-werewolf.md`
+  - 做了哪些自测 / 验证：
+    - `cd backend && go test ./...`
+    - `cd frontend && npm run test`
+    - `cd frontend && npm run build`
+    - `git status --short --ignored`（确认 `config/ai-presets.yaml` 仍是 ignored）
+    - `gh repo create chenxuan520/werewolf --public --source=. --remote=origin --push`
+  - 结果如何：
+    - 远端仓库已创建并推送成功：`https://github.com/chenxuan520/werewolf`
+    - 本地 `master` 已跟踪 `origin/master`。
+  - 风险或阻塞：
+    - 当前公开仓库仍缺 README 等补充说明；如果后续要给外部用户直接使用，还需要再补安装/启动说明。
+
 ## 审查
