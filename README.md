@@ -1,5 +1,7 @@
 # AI Werewolf Workbench
 
+[![CI](https://github.com/chenxuan520/werewolf/actions/workflows/ci.yml/badge.svg)](https://github.com/chenxuan520/werewolf/actions/workflows/ci.yml)
+
 > 一个本地优先的 AI 狼人杀工作台。你可以开纯 AI 观战局，也可以自己占 1 个座位，和其余 AI 一起跑完整场对局，并查看历史与回放。
 
 当前仓库已经有一版可跑的最小闭环：
@@ -88,6 +90,8 @@ cd backend && go test ./...
 cd frontend && npm run test
 cd frontend && npm run build
 ```
+
+GitHub Actions 也会在 `push` / `pull_request` 时自动跑同一套检查。
 
 ---
 

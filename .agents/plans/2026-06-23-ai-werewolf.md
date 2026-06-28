@@ -258,4 +258,23 @@
   - 风险或阻塞：
     - 当前 README 仍以本地运行说明为主，后续如果要面向陌生用户，还可以继续补截图、API 说明或更细的玩法说明。
 
+- 2026-06-25 10:51：补上 GitHub 仓库 about 信息和最小 CI。
+  - 做了什么：
+    - 使用 `gh repo edit` 给 GitHub 仓库补了公开 description，并设置 `ai / werewolf / llm / golang / react / vite / game` 等 topics。
+    - 新增 `.github/workflows/ci.yml`，在 `push` / `pull_request` 时自动运行后端 `go test ./...`，以及前端 `npm ci`、`npm run test`、`npm run build`。
+    - README 顶部补了 CI badge，并说明 GitHub Actions 会自动运行同一套检查。
+  - 改了哪些文件：
+    - `.github/workflows/ci.yml`
+    - `README.md`
+    - `.agents/plans/2026-06-23-ai-werewolf.md`
+  - 做了哪些自测 / 验证：
+    - `cd backend && go test ./...`
+    - `cd frontend && npm run test`
+    - `cd frontend && npm run build`
+    - `gh repo view chenxuan520/werewolf --json description,repositoryTopics,url`
+  - 结果如何：
+    - 仓库 about 信息已可直接在 GitHub 页面展示，CI 配置也已随代码入库，后续 push / PR 会自动执行基础检查。
+  - 风险或阻塞：
+    - 当前只做了 CI，还没接自动部署；如果后续要补 CD，需要先确定部署目标（例如 Vercel / 自托管 / Cloudflare Pages 等）。
+
 ## 审查
