@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -21,6 +22,9 @@ func NewServer(service *game.Service) *Server {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/templates", s.handleTemplates)
+	mux.HandleFunc("/api/capabilities", s.handleCapabilities)
+	mux.HandleFunc("/api/transcribe", s.handleTranscribe)
+	mux.HandleFunc("/api/presets/probe", s.handlePresetProbe)
 	mux.HandleFunc("/api/presets", s.handlePresets)
 	mux.HandleFunc("/api/games", s.handleGames)
 	mux.HandleFunc("/api/games/", s.handleGameByID)
@@ -43,6 +47,44 @@ func (s *Server) handlePresets(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"presets": s.service.ListPresets()})
+}
+
+func (s *Server) handlePresetProbe(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeMethodNotAllowed(w, http.MethodPost)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"probes": s.service.ProbePresets()})
+}
+
+func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeMethodNotAllowed(w, http.MethodGet)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"voiceInput": s.service.VoiceEnabled()})
+}
+
+func (s *Server) handleTranscribe(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeMethodNotAllowed(w, http.MethodPost)
+		return
+	}
+	var req struct {
+		Audio string `json:"audio"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid json: %v", err))
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
+	defer cancel()
+	text, err := s.service.Transcribe(ctx, req.Audio)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"text": text})
 }
 
 func (s *Server) handleGames(w http.ResponseWriter, r *http.Request) {

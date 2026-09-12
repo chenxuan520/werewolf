@@ -18,9 +18,10 @@ type Props = {
   isHuman: boolean
   bubble?: SeatBubble | null
   bubbleDirection?: 'up' | 'down'
+  potions?: { heal: boolean; poison: boolean } | null
 }
 
-export function WerewolfSeat({ style, name, seat, subtitle, roleText, revealedRole, note, isAlive, isActive, isHuman, bubble, bubbleDirection = 'up' }: Props) {
+export function WerewolfSeat({ style, name, seat, subtitle, roleText, revealedRole, note, isAlive, isActive, isHuman, bubble, bubbleDirection = 'up', potions }: Props) {
   const classes = ['council-seat', isAlive ? '' : 'is-dead', isActive ? 'is-active' : '', isHuman ? 'is-human' : 'is-ai']
     .filter(Boolean)
     .join(' ')
@@ -50,6 +51,12 @@ export function WerewolfSeat({ style, name, seat, subtitle, roleText, revealedRo
             {roleText ? <span className="council-seat-tag is-role">{roleText}</span> : null}
             {!roleText && revealedRole ? <span className="council-seat-tag is-revealed">翻牌 {revealedRole}</span> : null}
           </div>
+          {potions ? (
+            <div className="council-seat-potions">
+              <span className={`potion-chip ${potions.heal ? 'is-available' : 'is-used'}`}>解药{potions.heal ? '·剩' : '·用'}</span>
+              <span className={`potion-chip ${potions.poison ? 'is-available' : 'is-used'}`}>毒药{potions.poison ? '·剩' : '·用'}</span>
+            </div>
+          ) : null}
           <div className={`council-seat-note ${note ? '' : 'is-empty'}`}>{note || '等待本轮公开信息'}</div>
         </div>
       </div>

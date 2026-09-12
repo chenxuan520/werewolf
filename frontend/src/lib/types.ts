@@ -7,6 +7,16 @@ export type Preset = {
   model?: string
 }
 
+export type PresetProbe = {
+  id: string
+  name: string
+  model?: string
+  usesLLM: boolean
+  ok: boolean
+  latencyMs?: number
+  error?: string
+}
+
 export type Template = {
   id: string
   name: string

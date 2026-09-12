@@ -31,8 +31,12 @@ func main() {
 	if err != nil {
 		log.Fatalf("load presets: %v", err)
 	}
+	asr, err := config.LoadASR(presetsPath)
+	if err != nil {
+		log.Fatalf("load asr: %v", err)
+	}
 
-	service := game.NewService(presets)
+	service := game.NewService(presets, asr)
 	server := httpapi.NewServer(service)
 	addr := fmt.Sprintf(":%d", runtimeConfig.Backend.Port)
 	log.Printf("werewolf backend listening on %s using %s", addr, presetsPath)

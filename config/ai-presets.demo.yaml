@@ -33,3 +33,13 @@ presets:
     extra_body:
       thinking:
         type: disabled
+
+# 可选：语音转写。人机局里真人发言时可用麦克风口述，后端会把音频转成文字。
+# 参考 /Users/bytedance/self/voice2text 的 mimo provider（OpenAI 兼容 chat/completions + input_audio）。
+# 不填 asr 或字段留空即视为关闭，前端不会显示麦克风按钮。
+asr:
+  endpoint: https://api.xiaomimimo.com/v1
+  token: replace-with-your-token
+  model: mimo-v2.5-asr
+  language: zh
+

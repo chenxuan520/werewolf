@@ -7,7 +7,7 @@ import (
 )
 
 func TestCreateHumanGamePausesForHumanDecision(t *testing.T) {
-	service := NewService(testPresets())
+	service := NewService(testPresets(), config.ASRConfig{})
 	snapshot, err := service.CreateGame(CreateRequest{
 		TemplateID:    "classic-6",
 		SpectatorMode: false,
@@ -30,7 +30,7 @@ func TestCreateHumanGamePausesForHumanDecision(t *testing.T) {
 }
 
 func TestSpectatorGameCanAutoFinish(t *testing.T) {
-	service := NewService(testPresets())
+	service := NewService(testPresets(), config.ASRConfig{})
 	snapshot, err := service.CreateGame(CreateRequest{
 		TemplateID:    "classic-9",
 		SpectatorMode: true,

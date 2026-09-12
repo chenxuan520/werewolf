@@ -21,6 +21,7 @@ type Service struct {
 	templateByID   map[string]Template
 	presets        []config.Preset
 	presetByID     map[string]config.Preset
+	asr            config.ASRConfig
 	aiClient       *backendai.Client
 	games          map[string]*gameState
 	subscribers    map[string]map[*subscriber]struct{}
@@ -73,12 +74,14 @@ type gameState struct {
 	SeerChecked      map[int]struct{}
 	WitchHealUsed    bool
 	WitchPoisonUsed  bool
+	WitchHealedSeat  int
+	WitchPoisonedSeat int
 	GuardLastTarget  int
 	HunterShotUsed   bool
 	RNG              *rand.Rand
 }
 
-func NewService(presets []config.Preset) *Service {
+func NewService(presets []config.Preset, asr config.ASRConfig) *Service {
 	templates := DefaultTemplates()
 	templateByID := make(map[string]Template, len(templates))
 	for _, template := range templates {
@@ -93,11 +96,29 @@ func NewService(presets []config.Preset) *Service {
 		templateByID: templateByID,
 		presets:      append([]config.Preset(nil), presets...),
 		presetByID:   presetByID,
+		asr:          asr,
 		aiClient:     backendai.NewClient(),
 		games:        map[string]*gameState{},
 		subscribers:  map[string]map[*subscriber]struct{}{},
 		autoplaying:  map[string]bool{},
 	}
+}
+
+// VoiceEnabled 表示是否配置了可用的语音转写。
+func (s *Service) VoiceEnabled() bool {
+	return s.asr.Enabled()
+}
+
+// Transcribe 把浏览器上传的 wav base64 音频转成文字。
+func (s *Service) Transcribe(ctx context.Context, audioBase64 string) (string, error) {
+	if !s.asr.Enabled() {
+		return "", fmt.Errorf("语音转写未配置")
+	}
+	audioBase64 = strings.TrimSpace(audioBase64)
+	if audioBase64 == "" {
+		return "", fmt.Errorf("音频为空")
+	}
+	return s.aiClient.Transcribe(ctx, s.asr, audioBase64)
 }
 
 func (s *Service) ListTemplates() []Template {
@@ -114,6 +135,44 @@ func (s *Service) ListPresets() []config.Preset {
 	out := make([]config.Preset, len(s.presets))
 	copy(out, s.presets)
 	return out
+}
+
+// PresetProbe 是单个 preset 的可用性探测结果，供 Lobby 展示健康状态。
+type PresetProbe struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Model     string `json:"model,omitempty"`
+	UsesLLM   bool   `json:"usesLLM"`
+	OK        bool   `json:"ok"`
+	LatencyMs int64  `json:"latencyMs,omitempty"`
+	Error     string `json:"error,omitempty"`
+}
+
+// ProbePresets 并发对所有 preset 发一次轻量探测请求，返回每个 preset 的健康状态。
+// 脚本化 preset（未配置 endpoint/token/model）直接标记为可用，不发网络请求。
+func (s *Service) ProbePresets() []PresetProbe {
+	presets := s.ListPresets()
+	results := make([]PresetProbe, len(presets))
+	var wg sync.WaitGroup
+	for idx, preset := range presets {
+		results[idx] = PresetProbe{ID: preset.ID, Name: preset.Name, Model: preset.Model, UsesLLM: preset.UsesLLM()}
+		if !preset.UsesLLM() {
+			results[idx].OK = true
+			continue
+		}
+		wg.Add(1)
+		go func(i int, p config.Preset) {
+			defer wg.Done()
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			probe := s.aiClient.Probe(ctx, p)
+			results[i].OK = probe.OK
+			results[i].LatencyMs = probe.LatencyMs
+			results[i].Error = probe.Error
+		}(idx, preset)
+	}
+	wg.Wait()
+	return results
 }
 
 func (s *Service) CreateGame(req CreateRequest) (Snapshot, error) {
@@ -204,6 +263,8 @@ func (s *Service) CreateGame(req CreateRequest) (Snapshot, error) {
 		NightHealTarget:   -1,
 		NightPoisonTarget: -1,
 		NightGuardTarget:  -1,
+		WitchHealedSeat:   -1,
+		WitchPoisonedSeat: -1,
 		GuardLastTarget:   -1,
 		NightWolfVotes:    map[int]int{},
 		SeerFindings:      map[int]Role{},
@@ -306,7 +367,6 @@ func (s *Service) runAutoplayIteration(id string) (Snapshot, []Event, bool, erro
 		s.mu.Unlock()
 		return snapshot, nil, true, nil
 	}
-	prevDay := game.Day
 	actor := s.currentActor(game)
 	if actor < 0 && game.PendingResume != "" {
 		s.resumePendingState(game)
@@ -347,7 +407,11 @@ func (s *Service) runAutoplayIteration(id string) (Snapshot, []Event, bool, erro
 		if game.Control.ManualMode {
 			done = true
 		} else if game.Control.SemiAutoMode {
-			if !game.Control.Running || game.Day > prevDay {
+			// 半自动只在“当天投票结算后”停下，此时 shouldPauseAfterDayVote
+			// 会把 Running 置 false。不要再用 Day 变化当停点：resumePendingState
+			// 会在同一次迭代里推进到下一夜（Day++），若以 Day 变化为停点，
+			// continue 后只走一步就停，导致需要点两次。
+			if !game.Control.Running {
 				done = true
 			}
 		}
@@ -702,7 +766,9 @@ func (s *Service) applyAIAction(game *gameState, actor int) {
 
 func (s *Service) applyLLMAction(game *gameState, actor int) (bool, error) {
 	preset := game.Players[actor].Preset
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	// 预算覆盖最多 3 次重试；慢模型（如 kimi 单次 10~16s）在共享 45s 下容易
+	// 在第 2、3 次重试时撞 context deadline，这里放宽到 90s 给重试留空间。
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	decision, err := s.aiClient.Decide(ctx, preset, s.buildLLMTurnInput(game, actor))
 	if err != nil {
@@ -781,7 +847,7 @@ func (s *Service) buildLLMTurnInput(game *gameState, actor int) backendai.TurnIn
 		YourRole:       roleDisplay(game.Players[actor].Role),
 		Persona:        strings.TrimSpace(game.Players[actor].Preset.Persona),
 		AlivePlayers:   s.turnPlayers(game),
-		PublicLog:      s.visibleRoundLogForAI(game, actor),
+		PublicLog:      s.visibleMemoryLogForAI(game, actor),
 		PrivateNotes:   s.privateNotesForSeat(game, actor),
 		ValidTargets:   s.turnTargets(game, actor),
 		AllowSpeech:    game.Phase == "day_main" || game.Phase == "day_reply",
@@ -799,49 +865,44 @@ func (s *Service) buildLLMTurnInput(game *gameState, actor int) backendai.TurnIn
 	return input
 }
 
-func (s *Service) visibleRoundLogForAI(game *gameState, actor int) []string {
-	startSeq := roundStartSequence(game)
+func (s *Service) visibleMemoryLogForAI(game *gameState, actor int) []string {
+	// 只喂近 2 天（当前天 + 上一天）的可见事件摘要：既能支撑跨天推理，
+	// 又避免把整局历史全塞进 prompt 导致 token 随天数线性膨胀。
+	minDay := game.Day - 1
 	log := make([]string, 0, len(game.Events))
 	for _, event := range game.Events {
-		if event.Sequence < startSeq {
+		if !visibleToSeat(event, game, actor) {
 			continue
 		}
-		if !visibleToSeat(event, game, actor) {
+		day, hasDay := eventDay(event)
+		if hasDay && day < minDay {
 			continue
 		}
 		if item := summarizeVisibleEvent(event); item != "" {
 			log = append(log, item)
 		}
 	}
+	// 兜底硬上限：即便 2 天内事件异常多，也只保留最近的若干条。
+	const maxLogLines = 48
+	if len(log) > maxLogLines {
+		log = log[len(log)-maxLogLines:]
+	}
 	return log
 }
 
-func roundStartSequence(game *gameState) int {
-	if game == nil || len(game.Events) == 0 {
-		return 1
+func eventDay(event Event) (int, bool) {
+	payload, ok := event.Payload.(map[string]any)
+	if !ok {
+		return 0, false
 	}
-	targetPhase := game.Phase
-	switch {
-	case strings.HasPrefix(game.Phase, "day_"):
-		targetPhase = "day_main"
-	case strings.HasPrefix(game.Phase, "night_") || game.Phase == "night":
-		targetPhase = "night"
+	switch value := payload["day"].(type) {
+	case int:
+		return value, true
+	case float64:
+		return int(value), true
+	default:
+		return 0, false
 	}
-	for index := len(game.Events) - 1; index >= 0; index-- {
-		event := game.Events[index]
-		if event.Type != "phase_started" {
-			continue
-		}
-		payload, ok := event.Payload.(map[string]any)
-		if !ok {
-			continue
-		}
-		phase, _ := payload["phase"].(string)
-		if strings.TrimSpace(phase) == targetPhase {
-			return event.Sequence
-		}
-	}
-	return 1
 }
 
 func visibleToSeat(event Event, game *gameState, actor int) bool {
@@ -1045,7 +1106,7 @@ func (s *Service) applyTargetAction(game *gameState, actor int, target int) {
 			"seat":       actor,
 			"targetSeat": target,
 			"targetName": game.Players[target].Name,
-			"result":     roleDisplay(game.Players[target].Role),
+			"result":     seerResult(game.Players[target].Role),
 		})
 		s.advanceActor(game)
 		s.startNightWitch(game)
@@ -1077,10 +1138,12 @@ func (s *Service) applyWitch(game *gameState, actor int, useHeal bool, poisonTar
 	if useHeal && !game.WitchHealUsed && game.PendingNightKill >= 0 {
 		game.WitchHealUsed = true
 		game.NightHealTarget = game.PendingNightKill
+		game.WitchHealedSeat = game.PendingNightKill
 	}
 	if poisonTarget != nil && !game.WitchPoisonUsed {
 		game.WitchPoisonUsed = true
 		game.NightPoisonTarget = *poisonTarget
+		game.WitchPoisonedSeat = *poisonTarget
 	}
 	s.appendEvent(game, "witch_action_recorded", "private:witch", map[string]any{
 		"day":         game.Day,
@@ -1333,10 +1396,12 @@ func (s *Service) allowedTargets(game *gameState, actor int) []int {
 		return s.aliveOtherSeats(game, actor)
 	case "night_wolf":
 		out := make([]int, 0)
-		for _, seat := range s.aliveOtherSeats(game, actor) {
-			if game.Players[seat].Role != RoleWerewolf {
-				out = append(out, seat)
+		for _, seat := range s.aliveSeats(game) {
+			// 允许自刀：狼可以选自己；但不能刀其他狼队友。
+			if seat != actor && game.Players[seat].Role == RoleWerewolf {
+				continue
 			}
+			out = append(out, seat)
 		}
 		return out
 	case "night_seer":
@@ -1602,16 +1667,24 @@ func (s *Service) privateNotesForSeat(game *gameState, seat int) []string {
 		}
 		sort.Ints(seats)
 		for _, seat := range seats {
-			notes = append(notes, fmt.Sprintf("你验过 %s：%s", game.Players[seat].Name, roleDisplay(game.SeerFindings[seat])))
+			notes = append(notes, fmt.Sprintf("你验过 %s：%s", game.Players[seat].Name, seerResult(game.SeerFindings[seat])))
 		}
 	case RoleWitch:
 		if game.WitchHealUsed {
-			notes = append(notes, "解药：已使用")
+			if game.WitchHealedSeat >= 0 && game.WitchHealedSeat < len(game.Players) {
+				notes = append(notes, fmt.Sprintf("解药：已用（救了 %s）", game.Players[game.WitchHealedSeat].Name))
+			} else {
+				notes = append(notes, "解药：已使用")
+			}
 		} else {
 			notes = append(notes, "解药：未使用")
 		}
 		if game.WitchPoisonUsed {
-			notes = append(notes, "毒药：已使用")
+			if game.WitchPoisonedSeat >= 0 && game.WitchPoisonedSeat < len(game.Players) {
+				notes = append(notes, fmt.Sprintf("毒药：已用（毒了 %s）", game.Players[game.WitchPoisonedSeat].Name))
+			} else {
+				notes = append(notes, "毒药：已使用")
+			}
 		} else {
 			notes = append(notes, "毒药：未使用")
 		}
@@ -1652,7 +1725,10 @@ func (s *Service) pickTarget(game *gameState, actor int, options []int, phase st
 				}
 			}
 		case "night_wolf":
-			if targetRole == RoleSeer {
+			if target == actor {
+				// 允许自刀，但脚本 AI 不主动自刀。
+				score -= 100
+			} else if targetRole == RoleSeer {
 				score += 6
 			} else if targetRole == RoleWitch {
 				score += 5
@@ -1697,20 +1773,59 @@ func (s *Service) aiMainSpeech(game *gameState, actor int) string {
 			}
 		}
 	case RoleWerewolf:
-		return fmt.Sprintf("%s，我先听 %s 这轮怎么盘，当前不想太早站死边。", styleLead, name)
+		return fmt.Sprintf("%s，%s", styleLead, s.pickVariant(game, actor, []string{
+			fmt.Sprintf("我先听 %s 这轮怎么盘，当前不想太早站死边。", name),
+			fmt.Sprintf("%s 的发言我还没吃透，先挂着不急下结论。", name),
+			fmt.Sprintf("场上信息还散，我更想看 %s 后面怎么接。", name),
+		}))
 	case RoleWitch:
-		return fmt.Sprintf("%s，桌面信息还不够满，我先看 %s 的发言落点。", styleLead, name)
+		return fmt.Sprintf("%s，%s", styleLead, s.pickVariant(game, actor, []string{
+			fmt.Sprintf("桌面信息还不够满，我先看 %s 的发言落点。", name),
+			fmt.Sprintf("我手里有药，先稳一手，重点盯 %s。", name),
+			fmt.Sprintf("先别急着走票，我想再听听 %s 的逻辑。", name),
+		}))
 	case RoleHunter:
-		return fmt.Sprintf("%s，今天我先盯 %s，票型别乱飞。", styleLead, name)
+		return fmt.Sprintf("%s，%s", styleLead, s.pickVariant(game, actor, []string{
+			fmt.Sprintf("今天我先盯 %s，票型别乱飞。", name),
+			fmt.Sprintf("我这枪不虚，%s 要是站不干净就别怪我。", name),
+			fmt.Sprintf("先把 %s 拎出来盘一盘，好人别散票。", name),
+		}))
 	case RoleGuard:
-		return fmt.Sprintf("%s，先把 %s 的逻辑过一遍，再看后置位怎么接。", styleLead, name)
+		return fmt.Sprintf("%s，%s", styleLead, s.pickVariant(game, actor, []string{
+			fmt.Sprintf("先把 %s 的逻辑过一遍，再看后置位怎么接。", name),
+			fmt.Sprintf("我更想护住场面，%s 这轮的落点我不太认。", name),
+			fmt.Sprintf("别急着冲票，%s 的发言还得再听。", name),
+		}))
 	}
-	return fmt.Sprintf("%s，我现在更怀疑 %s，后面想看票型怎么落。", styleLead, name)
+	return fmt.Sprintf("%s，%s", styleLead, s.pickVariant(game, actor, []string{
+		fmt.Sprintf("我现在更怀疑 %s，后面想看票型怎么落。", name),
+		fmt.Sprintf("%s 给我的感觉偏虚，先记一笔。", name),
+		fmt.Sprintf("这轮我倾向压 %s，等回应轮再确认。", name),
+	}))
 }
 
 func (s *Service) aiReplySpeech(game *gameState, actor int, target int) string {
 	styleLead := styleLead(game.Players[actor].Preset.Style)
-	return fmt.Sprintf("%s，我回应一下 %s：你这轮的站边还是偏浮，我暂时不会把你放干净。", styleLead, game.Players[target].Name)
+	name := game.Players[target].Name
+	return fmt.Sprintf("%s，%s", styleLead, s.pickVariant(game, actor, []string{
+		fmt.Sprintf("我回应一下 %s：你这轮的站边还是偏浮，我暂时不会把你放干净。", name),
+		fmt.Sprintf("接 %s 一句：你的解释没打消我的疑虑，先继续观察你。", name),
+		fmt.Sprintf("说到 %s，我觉得你逻辑还是绕，别怪我把票留着。", name),
+		fmt.Sprintf("%s 别急着摘干净，你这轮给的信息量不够。", name),
+	}))
+}
+
+// pickVariant 用座位号 + 当前天在候选话术里做确定性但分散的选择，
+// 避免同一角色的多个脚本 AI 每轮输出一模一样的句子。
+func (s *Service) pickVariant(game *gameState, actor int, variants []string) string {
+	if len(variants) == 0 {
+		return ""
+	}
+	idx := (actor + game.Day) % len(variants)
+	if idx < 0 {
+		idx += len(variants)
+	}
+	return variants[idx]
 }
 
 func (s *Service) aiWitchAction(game *gameState, actor int) (bool, *int) {
@@ -1825,6 +1940,15 @@ func roleDisplay(role Role) string {
 	default:
 		return "平民"
 	}
+}
+
+// seerResult 是预言家查验的正确结果：预言家只能验出「狼人 / 好人」（金水），
+// 看不到神职具体身份。狼人是查杀，其余一律好人。
+func seerResult(role Role) string {
+	if role == RoleWerewolf {
+		return "狼人（查杀）"
+	}
+	return "好人（金水）"
 }
 
 func roleDisplayText(role string) string {

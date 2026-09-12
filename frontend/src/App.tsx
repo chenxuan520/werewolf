@@ -1,10 +1,12 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { Dispatch, SetStateAction } from 'react'
 import { WerewolfSeat } from './components/WerewolfSeat'
-import { controlGame, createGame, fetchGame, fetchPresets, fetchRecords, fetchReplay, fetchTemplates, submitGameAction } from './lib/api'
+import { controlGame, createGame, fetchCapabilities, fetchGame, fetchPresets, fetchRecords, fetchReplay, fetchTemplates, probePresets, submitGameAction, transcribeAudio } from './lib/api'
 import { subscribeGameStream } from './lib/sse'
 import { seatLayout } from './lib/seatLayout'
-import type { PendingAction, Preset, RecordSummary, ReplayDetail, Snapshot, Template } from './lib/types'
+import { isRecordingSupported, startRecording } from './lib/voice'
+import { isSpeechSupported, onSpeakingChange, setSpeechVolume, speak, stopSpeaking, type SpeechItem } from './lib/tts'
+import type { PendingAction, Preset, PresetProbe, RecordSummary, ReplayDetail, Snapshot, Template } from './lib/types'
 
 type Tab = 'lobby' | 'room' | 'history' | 'replay'
 
@@ -39,6 +41,16 @@ export default function App() {
   const [useHeal, setUseHeal] = useState(false)
   const [poisonTarget, setPoisonTarget] = useState('')
   const [selectedReplayStepIndex, setSelectedReplayStepIndex] = useState(0)
+  const [probing, setProbing] = useState(false)
+  const [probeResults, setProbeResults] = useState<Map<string, PresetProbe>>(new Map())
+  const [voiceInputEnabled, setVoiceInputEnabled] = useState(false)
+  const [recording, setRecording] = useState(false)
+  const [transcribing, setTranscribing] = useState(false)
+  const [ttsEnabled, setTtsEnabled] = useState(false)
+  const [ttsVolume, setTtsVolume] = useState(1)
+  const [nowSpeaking, setNowSpeaking] = useState<SpeechItem | null>(null)
+  const recorderRef = useRef<Awaited<ReturnType<typeof startRecording>> | null>(null)
+  const lastSpokenSeqRef = useRef<number>(0)
 
   useEffect(() => {
     let alive = true
@@ -52,6 +64,9 @@ export default function App() {
       })
       .catch((err: Error) => alive && setError(err.message))
       .finally(() => alive && setLoading(false))
+    fetchCapabilities()
+      .then((caps) => alive && setVoiceInputEnabled(Boolean(caps.voiceInput)))
+      .catch(() => undefined)
     return () => {
       alive = false
     }
@@ -99,6 +114,40 @@ export default function App() {
   useEffect(() => {
     setSelectedReplayStepIndex(0)
   }, [replay?.summary.id])
+
+  // 开启朗读后，把上次读过之后的所有新发言按顺序逐条入队朗读（不再只读最后一条）。
+  useEffect(() => {
+    if (!ttsEnabled || !game || tab !== 'room') return
+    const pending: { seq: number; speaker: string; text: string }[] = []
+    let maxSeq = lastSpokenSeqRef.current
+    for (const event of game.events) {
+      if (event.type !== 'speech_recorded') continue
+      if (event.sequence <= lastSpokenSeqRef.current) continue
+      const payload = event.payload as Record<string, unknown> | null
+      const text = payload && typeof payload.text === 'string' ? payload.text.trim() : ''
+      if (!text) continue
+      const speaker = payload && typeof payload.playerName === 'string' ? payload.playerName : ''
+      pending.push({ seq: event.sequence, speaker, text })
+      if (event.sequence > maxSeq) maxSeq = event.sequence
+    }
+    if (pending.length === 0) return
+    pending.sort((a, b) => a.seq - b.seq)
+    lastSpokenSeqRef.current = maxSeq
+    for (const item of pending) speak(item.text, item.speaker)
+  }, [game, ttsEnabled, tab])
+
+  useEffect(() => {
+    if (!ttsEnabled) {
+      stopSpeaking()
+      return
+    }
+    onSpeakingChange(setNowSpeaking)
+    return () => onSpeakingChange(null)
+  }, [ttsEnabled])
+
+  useEffect(() => {
+    setSpeechVolume(ttsVolume)
+  }, [ttsVolume])
 
   async function refreshGame(gameId: string) {
     try {
@@ -178,6 +227,49 @@ export default function App() {
     }
   }
 
+  async function handleProbePresets() {
+    setProbing(true)
+    setError(null)
+    try {
+      const probes = await probePresets()
+      setProbeResults(new Map(probes.map((probe) => [probe.id, probe])))
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setProbing(false)
+    }
+  }
+
+  async function handleToggleRecording() {
+    if (transcribing) return
+    if (recording) {
+      const recorder = recorderRef.current
+      recorderRef.current = null
+      setRecording(false)
+      if (!recorder) return
+      setTranscribing(true)
+      setError(null)
+      try {
+        const audioBase64 = await recorder.stop()
+        const text = await transcribeAudio(audioBase64)
+        if (text) setSpeechText((current) => (current.trim() ? `${current.trim()} ${text}` : text))
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err))
+      } finally {
+        setTranscribing(false)
+      }
+      return
+    }
+    setError(null)
+    try {
+      const recorder = await startRecording()
+      recorderRef.current = recorder
+      setRecording(true)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    }
+  }
+
   return (
     <div className="shell">
       <header className="hero">
@@ -187,14 +279,19 @@ export default function App() {
           <p>参考 holdem 的工作台形态，先跑通纯 AI 观战和 1 真人参与两种模式。</p>
         </div>
         <nav className="tabs">
-          <button className={tab === 'lobby' ? 'active' : ''} onClick={() => setTab('lobby')}>Lobby</button>
-          <button className={tab === 'room' ? 'active' : ''} onClick={() => setTab('room')} disabled={!game}>Room</button>
-          <button className={tab === 'history' ? 'active' : ''} onClick={() => setTab('history')}>History</button>
-          <button className={tab === 'replay' ? 'active' : ''} onClick={() => setTab('replay')} disabled={!replay}>Replay</button>
+          <button className={tab === 'lobby' ? 'active' : ''} onClick={() => setTab('lobby')}>大厅</button>
+          <button className={tab === 'room' ? 'active' : ''} onClick={() => setTab('room')}>房间</button>
+          <button className={tab === 'history' ? 'active' : ''} onClick={() => setTab('history')}>历史</button>
+          <button className={tab === 'replay' ? 'active' : ''} onClick={() => setTab('replay')}>回放</button>
         </nav>
       </header>
 
-      {error ? <div className="error-banner">{error}</div> : null}
+      {error ? (
+        <div className="error-banner">
+          <span>{error}</span>
+          <button className="error-dismiss" onClick={() => setError(null)}>关闭</button>
+        </div>
+      ) : null}
 
       {loading ? <section className="panel">正在加载配置...</section> : null}
 
@@ -240,12 +337,18 @@ export default function App() {
               </label>
             ) : null}
             <div className="seat-stack">
+              <div className="probe-row">
+                <button className="ghost-button inline" onClick={handleProbePresets} disabled={probing || !presets.length}>
+                  {probing ? '检测中...' : '检测模型可用性'}
+                </button>
+                {probeResults.size ? <span className="probe-summary">{describeProbeSummary(probeResults)}</span> : <span className="probe-summary muted">点一下会对每个模型发一次轻量请求</span>}
+              </div>
               {selectedAI.map((value, index) => (
                 <label key={index}>
-                  <span>AI 座位 {index + 1}</span>
+                  <span>AI 座位 {index + 1}{probeBadgeText(probeResults.get(value))}</span>
                   <select value={value} onChange={(event) => updateAI(index, event.target.value, setSelectedAI)}>
                     {presets.map((preset) => (
-                      <option key={preset.id} value={preset.id}>{preset.name} · {presetSubtitle(preset)}</option>
+                      <option key={preset.id} value={preset.id}>{presetOptionLabel(preset, probeResults.get(preset.id))}</option>
                     ))}
                 </select>
                 </label>
@@ -272,11 +375,31 @@ export default function App() {
 
       {!loading && tab === 'room' ? (
         <section className="panel room-layout">
-          {!game ? <div className="empty">先创建一局。</div> : <>
+          {!game ? (
+            <div className="empty-guide">
+              <strong>当前没有进行中的对局</strong>
+              <p>去「历史」打开一局继续观看，或在「大厅」新建一局。</p>
+              <div className="empty-guide-actions">
+                <button className="primary" onClick={() => setTab('lobby')}>去大厅建局</button>
+                <button className="ghost-button" onClick={() => setTab('history')}>去历史打开</button>
+              </div>
+            </div>
+          ) : <>
             {(() => {
               const seatStyles = seatLayout(game.players.length)
               const seatNotes = buildSeatNoteMap(game.events)
               const latestSpeechBubble = buildLatestSpeechBubble(game.events)
+              // 开启朗读时，牌桌气泡跟随“当前正在朗读的那句”，让画面与语音对上；
+              // 否则维持显示最新一条发言。
+              const speakingSeat = ttsEnabled && nowSpeaking
+                ? game.players.find((p) => p.name === nowSpeaking.speaker)?.seat ?? null
+                : null
+              const activeBubble = speakingSeat !== null && nowSpeaking
+                ? { seat: speakingSeat, title: '发言中', detail: nowSpeaking.text }
+                : latestSpeechBubble
+              const tableEdges = buildTableEdges(game, seatStyles)
+              const edgeKinds = new Set(tableEdges.map((edge) => edge.kind))
+              const witchPotions = game.mode === 'spectator' ? buildWitchPotions(game) : null
               const currentActor = game.pendingAction ? game.players.find((player) => player.seat === game.pendingAction?.actorSeat) ?? null : null
               const turnStatus = describeWerewolfTurnStatus(game, currentActor?.name ?? null)
               const latestSpeech = [...game.events].reverse().find((event) => event.type === 'speech_recorded') ?? null
@@ -311,6 +434,39 @@ export default function App() {
                       {game.winnerSide ? <span className="table-center-note winner">胜方：{game.winnerSide}</span> : <span className="table-center-note">{game.pendingAction?.prompt || '等待下一步推进'}</span>}
                     </div>
                   </div>
+                  {tableEdges.length ? (
+                    <svg className="vote-arrow-layer" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+                      <defs>
+                        {(Object.keys(EDGE_COLORS) as EdgeKind[]).map((kind) => (
+                          <marker key={kind} id={`arrowhead-${kind}`} markerWidth="6" markerHeight="6" refX="4.4" refY="3" orient="auto">
+                            <path d="M0,0 L6,3 L0,6 Z" fill={EDGE_COLORS[kind]} />
+                          </marker>
+                        ))}
+                      </defs>
+                      {tableEdges.map((edge) => (
+                        <line
+                          key={edge.key}
+                          x1={edge.x1}
+                          y1={edge.y1}
+                          x2={edge.x2}
+                          y2={edge.y2}
+                          className="vote-arrow-line"
+                          stroke={EDGE_COLORS[edge.kind]}
+                          markerEnd={`url(#arrowhead-${edge.kind})`}
+                        />
+                      ))}
+                    </svg>
+                  ) : null}
+                  {edgeKinds.size ? (
+                    <div className="table-arrow-legend">
+                      {EDGE_LEGEND.filter((item) => edgeKinds.has(item.kind)).map((item) => (
+                        <span key={item.kind} className="legend-item">
+                          <i style={{ background: EDGE_COLORS[item.kind] }} />
+                          {item.label}
+                        </span>
+                      ))}
+                    </div>
+                  ) : null}
                   {game.players.map((player, index) => (
                     <WerewolfSeat
                       key={`${game.id}-${player.seat}`}
@@ -324,8 +480,9 @@ export default function App() {
                       isAlive={player.alive}
                       isActive={game.status === 'running' && game.pendingAction?.actorSeat === player.seat}
                       isHuman={player.isHuman}
-                      bubble={latestSpeechBubble?.seat === player.seat ? { title: latestSpeechBubble.title, detail: latestSpeechBubble.detail } : null}
+                      bubble={activeBubble?.seat === player.seat ? { title: activeBubble.title, detail: activeBubble.detail } : null}
                       bubbleDirection={seatStyles[index]?.bubbleDirection}
+                      potions={witchPotions && (player.role === '女巫' || player.revealedRole === '女巫') ? witchPotions : null}
                     />
                   ))}
                 </div>
@@ -351,6 +508,29 @@ export default function App() {
                   <button className="primary-button inline" onClick={() => handleControl('continue')} disabled={acting || game.status === 'finished' || game.status === 'stopped' || game.control?.manualMode}>
                     {game.control?.semiAutoMode ? '继续下一天' : '继续阶段'}
                   </button>
+                </div>
+              ) : null}
+
+              {isSpeechSupported() ? (
+                <div className="voice-toolbar">
+                  <button className={`ghost-button inline ${ttsEnabled ? 'is-active' : ''}`} onClick={() => setTtsEnabled((v) => !v)}>
+                    {ttsEnabled ? '🔊 朗读发言：开' : '🔈 朗读发言：关'}
+                  </button>
+                  {ttsEnabled ? (
+                    <label className="volume-control">
+                      <span>音量</span>
+                      <input
+                        type="range"
+                        min={0}
+                        max={100}
+                        value={Math.round(ttsVolume * 100)}
+                        onChange={(event) => setTtsVolume(Number(event.target.value) / 100)}
+                      />
+                      <span className="volume-value">{Math.round(ttsVolume * 100)}%</span>
+                    </label>
+                  ) : (
+                    <span className="voice-toolbar-hint">用浏览器免费语音朗读最新发言，更身临其境</span>
+                  )}
                 </div>
               ) : null}
 
@@ -397,7 +577,10 @@ export default function App() {
               </article> : null}
 
               <div className="action-panel">
-                <h3>当前行动</h3>
+                <div className="panel-head-inline">
+                  <h3>当前行动</h3>
+                  {acting ? <span className="acting-indicator">AI 行动中…</span> : null}
+                </div>
                 {game.pendingAction ? <PendingActionView pending={game.pendingAction} /> : <p>当前无待处理动作。</p>}
                 {renderActionForm(game.pendingAction, game.mode === 'spectator', {
                   acting,
@@ -410,6 +593,10 @@ export default function App() {
                   poisonTarget,
                   setPoisonTarget,
                   onSubmit: handleAction,
+                  voiceInputEnabled: voiceInputEnabled && isRecordingSupported(),
+                  recording,
+                  transcribing,
+                  onToggleRecording: handleToggleRecording,
                 })}
               </div>
 
@@ -459,7 +646,15 @@ export default function App() {
 
       {!loading && tab === 'replay' ? (
         <section className="panel room-layout replay-layout-shell">
-          {!replay ? <div className="empty">先从历史记录里打开一局。</div> : <>
+          {!replay ? (
+            <div className="empty-guide">
+              <strong>还没有选择回放</strong>
+              <p>去「历史」里选一局，点「查看回放」即可按步骤回看整局。</p>
+              <div className="empty-guide-actions">
+                <button className="ghost-button" onClick={() => setTab('history')}>去历史选择</button>
+              </div>
+            </div>
+          ) : <>
             {(() => {
               const stepEvents = currentReplayStep ? replay.events.slice(0, selectedReplayStepIndex + 1) : replay.events
               const seatStyles = seatLayout(replay.players.length)
@@ -597,6 +792,27 @@ function presetSubtitle(preset?: Preset) {
   return 'scripted'
 }
 
+function presetOptionLabel(preset: Preset, probe?: PresetProbe) {
+  const base = `${preset.name} · ${presetSubtitle(preset)}`
+  if (!probe) return base
+  if (probe.ok) return `✅ ${base}`
+  return `❌ ${base}`
+}
+
+function probeBadgeText(probe?: PresetProbe) {
+  if (!probe) return ''
+  if (probe.ok) {
+    return probe.latencyMs ? `　✅ ${probe.latencyMs}ms` : '　✅ 可用'
+  }
+  return '　❌ 不可用'
+}
+
+function describeProbeSummary(probes: Map<string, PresetProbe>) {
+  const all = [...probes.values()]
+  const okCount = all.filter((probe) => probe.ok).length
+  return `${okCount}/${all.length} 个模型可用`
+}
+
 function phaseLabel(phase: string) {
   switch (phase) {
     case 'night':
@@ -651,6 +867,131 @@ function buildSeatNoteMap(events: Snapshot['events'] | ReplayDetail['events']) {
     }
   }
   return notes
+}
+
+type EdgeKind = 'vote' | 'wolf' | 'seer' | 'heal' | 'poison' | 'guard'
+type TableEdge = { key: string; kind: EdgeKind; x1: number; y1: number; x2: number; y2: number }
+
+// 把牌桌上的一次“谁指向谁”动作换算成座位坐标间的箭头。
+// - day_vote 阶段：显示当天每个人的投票指向。
+// - night* 阶段（观战可见私有事件）：显示狼刀 / 预言家查验 / 女巫救毒 / 守卫守护。
+// 人机局下私有夜间事件不在快照里，自然不会画出，无需额外按模式过滤。
+function buildTableEdges(game: Snapshot, seatStyles: ReturnType<typeof seatLayout>): TableEdge[] {
+  const seatIndex = new Map<number, number>()
+  game.players.forEach((player, index) => seatIndex.set(player.seat, index))
+
+  const project = (from: number, to: number, kind: EdgeKind, key: string): TableEdge | null => {
+    const fromIdx = seatIndex.get(from)
+    const toIdx = seatIndex.get(to)
+    if (fromIdx === undefined || toIdx === undefined || from === to) return null
+    const a = seatStyles[fromIdx]
+    const b = seatStyles[toIdx]
+    if (!a || !b) return null
+    const x1 = parseFloat(a.left)
+    const y1 = parseFloat(a.top)
+    const x2 = parseFloat(b.left)
+    const y2 = parseFloat(b.top)
+    if (![x1, y1, x2, y2].every(Number.isFinite)) return null
+    // 从两端各向内缩一段，让箭头落在座位卡边缘而不是压住卡片中心。
+    const dx = x2 - x1
+    const dy = y2 - y1
+    const len = Math.hypot(dx, dy) || 1
+    const pad = 7
+    return { key, kind, x1: x1 + (dx / len) * pad, y1: y1 + (dy / len) * pad, x2: x2 - (dx / len) * pad, y2: y2 - (dy / len) * pad }
+  }
+
+  const edges: TableEdge[] = []
+  const push = (edge: TableEdge | null) => {
+    if (edge) edges.push(edge)
+  }
+
+  if (game.phase === 'day_vote') {
+    const latestBySeat = new Map<number, number>()
+    for (const event of game.events) {
+      if (event.type !== 'vote_cast') continue
+      const payload = asRecord(event.payload)
+      if (asNumber(payload.day) !== game.day) continue
+      const from = asNumber(payload.seat)
+      const to = asNumber(payload.targetSeat)
+      if (from === null || to === null) continue
+      latestBySeat.set(from, to)
+    }
+    for (const [from, to] of latestBySeat) {
+      push(project(from, to, 'vote', `vote-${from}-${to}`))
+    }
+    return edges
+  }
+
+  if (game.phase.startsWith('night')) {
+    for (const event of game.events) {
+      const payload = asRecord(event.payload)
+      if (asNumber(payload.day) !== game.day) continue
+      const from = asNumber(payload.seat)
+      switch (event.type) {
+        case 'wolf_target_selected': {
+          const to = asNumber(payload.targetSeat)
+          if (from !== null && to !== null) push(project(from, to, 'wolf', `wolf-${from}-${to}`))
+          break
+        }
+        case 'seer_checked': {
+          const to = asNumber(payload.targetSeat)
+          if (from !== null && to !== null) push(project(from, to, 'seer', `seer-${from}-${to}`))
+          break
+        }
+        case 'guard_selected': {
+          const to = asNumber(payload.targetSeat)
+          if (from !== null && to !== null) push(project(from, to, 'guard', `guard-${from}-${to}`))
+          break
+        }
+        case 'witch_action_recorded': {
+          if (from === null) break
+          if (payload.useHeal === true) {
+            const heal = asNumber(payload.healTarget)
+            if (heal !== null && heal >= 0) push(project(from, heal, 'heal', `heal-${from}-${heal}`))
+          }
+          if (payload.usePoison === true) {
+            const poison = asNumber(payload.poisonTarget)
+            if (poison !== null && poison >= 0) push(project(from, poison, 'poison', `poison-${from}-${poison}`))
+          }
+          break
+        }
+        default:
+          break
+      }
+    }
+  }
+  return edges
+}
+
+const EDGE_COLORS: Record<EdgeKind, string> = {
+  vote: 'rgba(255, 196, 112, 0.92)',
+  wolf: 'rgba(255, 108, 108, 0.95)',
+  seer: 'rgba(110, 197, 255, 0.95)',
+  heal: 'rgba(112, 224, 160, 0.95)',
+  poison: 'rgba(196, 140, 255, 0.95)',
+  guard: 'rgba(120, 222, 214, 0.95)',
+}
+
+const EDGE_LEGEND: { kind: EdgeKind; label: string }[] = [
+  { kind: 'wolf', label: '狼刀' },
+  { kind: 'seer', label: '预言家查验' },
+  { kind: 'heal', label: '女巫救' },
+  { kind: 'poison', label: '女巫毒' },
+  { kind: 'guard', label: '守卫守护' },
+  { kind: 'vote', label: '投票' },
+]
+
+// 从全局 witch_action_recorded 事件推导女巫两瓶药是否还剩：用过即视为耗尽。
+function buildWitchPotions(game: Snapshot): { heal: boolean; poison: boolean } {
+  let heal = true
+  let poison = true
+  for (const event of game.events) {
+    if (event.type !== 'witch_action_recorded') continue
+    const payload = asRecord(event.payload)
+    if (payload.useHeal === true) heal = false
+    if (payload.usePoison === true) poison = false
+  }
+  return { heal, poison }
 }
 
 function buildLatestSpeechBubble(events: Snapshot['events'] | ReplayDetail['events']) {
@@ -995,6 +1336,10 @@ function renderActionForm(
     poisonTarget: string
     setPoisonTarget: (value: string) => void
     onSubmit: (payload: { action: string; text?: string; targetSeat?: number; useHeal?: boolean; usePoison?: boolean }) => void
+    voiceInputEnabled: boolean
+    recording: boolean
+    transcribing: boolean
+    onToggleRecording: () => void
   },
 ) {
   if (!pending) return null
@@ -1005,19 +1350,30 @@ function renderActionForm(
     return (
       <div className="form-stack">
         <textarea value={state.speechText} placeholder={pending.placeholder} onChange={(event) => state.setSpeechText(event.target.value)} />
-        <button className="primary" disabled={state.acting || !state.speechText.trim()} onClick={() => state.onSubmit({ action: 'speech', text: state.speechText })}>提交发言</button>
+        <div className="speech-actions">
+          {state.voiceInputEnabled ? (
+            <button
+              className={`ghost-button inline mic-button ${state.recording ? 'is-recording' : ''}`}
+              disabled={state.acting || state.transcribing}
+              onClick={state.onToggleRecording}
+            >
+              {state.transcribing ? '识别中…' : state.recording ? '⏺ 停止并识别' : '🎤 语音输入'}
+            </button>
+          ) : null}
+          <button className="primary" disabled={state.acting || state.transcribing || !state.speechText.trim()} onClick={() => state.onSubmit({ action: 'speech', text: state.speechText })}>{state.acting ? '提交中…' : '提交发言'}</button>
+        </div>
       </div>
     )
   }
   if (pending.kind === 'select') {
     return (
       <div className="form-stack">
-        <select value={state.selectedTarget} onChange={(event) => state.setSelectedTarget(event.target.value)}>
+        <select value={state.selectedTarget} onChange={(event) => state.setSelectedTarget(event.target.value)} disabled={state.acting}>
           {(pending.options ?? []).map((option) => (
             <option key={option.value} value={option.value}>{option.label}</option>
           ))}
         </select>
-        <button className="primary" disabled={state.acting || state.selectedTarget === ''} onClick={() => state.onSubmit({ action: 'select', targetSeat: Number(state.selectedTarget) })}>提交目标</button>
+        <button className="primary" disabled={state.acting || state.selectedTarget === ''} onClick={() => state.onSubmit({ action: 'select', targetSeat: Number(state.selectedTarget) })}>{state.acting ? '提交中…' : '提交目标'}</button>
       </div>
     )
   }
@@ -1025,10 +1381,10 @@ function renderActionForm(
     return (
       <div className="form-stack">
         <label className="checkbox-row">
-          <input type="checkbox" checked={state.useHeal} disabled={!pending.allowHeal} onChange={(event) => state.setUseHeal(event.target.checked)} />
+          <input type="checkbox" checked={state.useHeal} disabled={!pending.allowHeal || state.acting} onChange={(event) => state.setUseHeal(event.target.checked)} />
           <span>使用解药</span>
         </label>
-        <select value={state.poisonTarget} onChange={(event) => state.setPoisonTarget(event.target.value)}>
+        <select value={state.poisonTarget} onChange={(event) => state.setPoisonTarget(event.target.value)} disabled={state.acting}>
           <option value="">不使用毒药</option>
           {(pending.options ?? []).map((option) => (
             <option key={option.value} value={option.value}>{option.label}</option>
@@ -1048,7 +1404,7 @@ function renderActionForm(
               })
             }
           >
-            提交药剂
+            {state.acting ? '提交中…' : '提交药剂'}
           </button>
         </div>
       </div>

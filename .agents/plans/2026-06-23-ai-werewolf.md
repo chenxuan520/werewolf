@@ -277,4 +277,63 @@
   - 风险或阻塞：
     - 当前只做了 CI，还没接自动部署；如果后续要补 CD，需要先确定部署目标（例如 Vercel / 自托管 / Cloudflare Pages 等）。
 
+- 2026-09-12：更新本地 AI 预设、优化 AI 发言观感与对局连贯性，并把 fallback 率压到接近 0。
+  - 做了什么：
+    - 排查发现旧 `config/ai-presets.yaml` 里大量 token 已失效（llmbox 那批 `at-` token 全部 401、ark 那批全部 404 UnsupportedModel），导致真实模型频繁回退脚本、发言一句复读。从本机 ttadk 环境确认唯一可用的是 `gpt-5-4` 预设自带的 `sk-` key（属 `ttadk` 租户），逐模型探测后把预设收敛为实测能通的 9 个：`gpt-5-4 / gpt-5-5 / gpt-5-3-codex / glm-5-1 / glm-5-2 / deepseek-v4-pro / kimi-k2-5 / minimax-m2-7 / mimo-v2.5-pro`。
+    - `gpt-5.5` 不支持 `temperature`，用 `extra_body: {temperature: null}` 让客户端删掉该字段（依赖已有 `mergeExtraBody` 的 null 删除语义）。
+    - 后端把喂给 LLM 的 `PublicLog` 从「仅当前轮」改成「近 2 天可见事件摘要」（新 `visibleMemoryLogForAI`，按座位可见性过滤 + 48 条硬上限控 token），补齐跨天记忆；删除因此变成死代码的 `visibleRoundLogForAI` / `roundStartSequence`。
+    - 脚本 fallback 发言多样化：`aiMainSpeech` / `aiReplySpeech` 每角色改为 3~4 条候选话术，用 `pickVariant`（座位号 + 天数确定性取模）分散，避免同角色多 AI 每轮输出完全一样。
+    - 新增 preset 可用性探测：`Service.ProbePresets`（并发调已有 `ai.Client.Probe`，脚本 preset 直接标可用不发网络请求）+ `POST /api/presets/probe`；前端 Lobby 加「检测模型可用性」按钮，选项前显示 ✅/❌、座位标签显示延迟、顶部显示「X/Y 个模型可用」。
+    - 降 fallback：实测确认 `glm-5.2 / minimax-m2.7 / kimi-k2.5` 是推理型模型，会先烧 CoT 再吐 JSON，`max_tokens: 512` 被思考过程吃光导致 `finish_reason=length` 空 JSON。按实测定档抬高上限：`glm-5-2=1200`、`minimax-m2-7=1024`、`kimi-k2-5=2048`；kimi 在 `json_object` 下 2048 仍偶截断，换回 `tool_call` 后 2048 稳定不截断。同时把 `applyLLMAction` 单次决策超时从 45s 放宽到 90s，给慢模型（kimi 单次 10~16s）的 3 次重试留预算。
+  - 改了哪些文件：
+    - `config/ai-presets.yaml`（本机真实配置，仍被 `.gitignore` 忽略，不进仓库）
+    - `backend/internal/game/service.go`
+    - `backend/internal/httpapi/server.go`
+    - `frontend/src/App.tsx`
+    - `frontend/src/lib/api.ts`
+    - `frontend/src/lib/types.ts`
+    - `frontend/src/styles.css`
+  - 做了哪些自测 / 验证：
+    - `cd backend && go test ./...`、`go build ./...`、`go vet ./...`
+    - `cd frontend && npm run test`、`npm run build`
+    - 探测接口：`POST /api/presets/probe` 返回 9/9 preset OK（延迟 1.4~5.6s）。
+    - 真实局对照：专挑最易截断的 `2×kimi + 2×minimax + 2×glm-5.2` 跑全自动整局，改前 `fallback=6`（4 次 length 截断 + 2 次超时），改后 `ok=25 / fallback=0`，跑完整局 `finished / 好人阵营 / 71 events`。
+    - 混合真实模型局发言明显像人（如「我是女巫昨夜0号吃刀我救了」「1号跳女巫报0号银水逻辑自洽我认这个女巫」）。
+  - 结果如何：
+    - 真实模型链路稳定可用，之前「一句复读、全脚本兜底」的假效果消除；纯 AI 观战整局可 0 fallback 完成。
+    - Lobby 现在能在建局前一眼看出哪些模型健康，不用跑一局才发现全在裸退。
+  - 风险或阻塞：
+    - `sk-` key 无法看到过期时间（当前实测有效）；ttadk 的 SSO token 显示 9/17 过期。若某天又大面积 fallback，多半是 key 轮换，需从 ttadk 环境重新取。
+    - `kimi-k2.5` 慢且 token 消耗大（一回合可能烧 1000+，多在 CoT），纯 AI 全自动局要注意成本。
+    - 偶发 `context deadline exceeded` 属模型/网络抖动，无法根除，但已放宽超时且保留脚本兜底，不会卡住对局。
+    - 本轮前端只做了静态验证（tsc + build 通过），未做浏览器页面 smoke：MCP chrome 的 `chrome-profile` 被 codex 自身启动的 chrome-devtools-mcp 实例占用，isolated context 亦不可用，暂时无法在不 kill 的前提下走真实页面验证。
+
+- 2026-09-12（续）：一批房间体验修复 + 语音输入/朗读 + 规则修正。
+  - 做了什么：
+    - 顶部导航中文化：`Lobby/Room/History/Replay` → `大厅/房间/历史/回放`。
+    - 投票箭头：白天投票阶段在牌桌上画出「谁投谁」的箭头；进一步扩展成 `buildTableEdges`，观战夜间还画狼刀/预言家查验/女巫救毒/守卫守护箭头，配底部图例（不同颜色 + marker）。人机局私有夜间事件不在快照里，自然不画、不泄露信息。
+    - 女巫信息：座位卡显示解药/毒药剩余（观战），真人女巫的「你的身份」笔记显示「解药：已用（救了 X）/毒药：已用（毒了 Y）」，新增 `WitchHealedSeat` / `WitchPoisonedSeat`。
+    - 半自动 bug：修复「继续下一天」需点两次——`runAutoplayIteration` 之前用 `Day>prevDay` 当停点，但 `resumePendingState` 同迭代内会 `Day++`，改成只用 `!Running`（由 `shouldPauseAfterDayVote` 触发）。
+    - 语音输入：新增 `ASRConfig` + `LoadASR` + `internal/ai/asr.go`（参考 voice2text 的 mimo provider，走 chat/completions + input_audio wav base64），`POST /api/transcribe`、`GET /api/capabilities`；前端 `lib/voice.ts` 浏览器录音→16k 单声道 WAV→base64，人机发言框加 🎤 语音输入按钮。
+    - 语音朗读：`lib/tts.ts` 用浏览器免费 `speechSynthesis` 朗读发言，房间加开关 + 音量滑块。修了两个 bug：多条发言改成队列逐条朗读（之前互相 cancel 只剩最后一句）、入队从「只读最后一条」改成「上次之后的新发言全部按序入队」；牌桌发言气泡跟随「当前正在朗读的那条」，让画面与语音对上。
+    - 交互反馈：提交类按钮点击后变「提交中…」并禁用，「当前行动」标题在等 AI 时显示「AI 行动中…」。
+    - 报错不再瘫痪：错误条加「关闭」按钮；房间/回放 tab 去掉 disabled，无对局/回放时显示引导页（去大厅建局 / 去历史打开），避免刷新后按钮变灰以为卡死。
+    - 规则修正1：允许狼人自刀——`allowedTargets` 的 `night_wolf` 改为可选自己（仍不能刀队友），脚本 AI 兜底给「刀自己」减分不主动自刀。
+    - 规则修正2：预言家查验只返回「好人（金水）/ 狼人（查杀）」——新增 `seerResult()`，替换之前直接暴露真实神职（验女巫显示「平民」）的错误。
+  - 改了哪些文件：
+    - `backend/internal/config/presets.go`、`backend/internal/ai/asr.go`、`backend/internal/game/service.go`、`backend/internal/game/service_test.go`、`backend/internal/httpapi/server.go`、`backend/cmd/server/main.go`
+    - `frontend/src/App.tsx`、`frontend/src/components/WerewolfSeat.tsx`、`frontend/src/lib/api.ts`、`frontend/src/lib/types.ts`、`frontend/src/lib/voice.ts`、`frontend/src/lib/tts.ts`、`frontend/src/styles.css`
+    - `config/ai-presets.demo.yaml`（加 asr 占位块；真实配置在 gitignored 的 `config/ai-presets.yaml`）
+  - 做了哪些自测 / 验证：
+    - `cd backend && go test ./...`、`go build`、`go vet`；`cd frontend && npm run test`、`npm run build`。
+    - 后端接口 smoke：`/api/capabilities` 返回 `voiceInput:true`；`/api/transcribe` 用静音 WAV 实测 mimo ASR 返回 200 可识别；`seer_checked` 结果实测为「好人（金水）」；半自动「继续」一次点击即推进到下一停点。
+    - 浏览器 smoke：投票箭头、夜间行动箭头 + 图例、女巫药剂标识均确认显示；人机局 🎤 语音输入按钮、🔊 朗读开关 + 音量滑块确认出现。
+  - 结果如何：
+    - 房间体验大幅收敛：投票/夜间行动可视化、女巫与预言家信息按规则正确展示、半自动一次点击推进、报错可恢复不瘫痪、狼可自刀。
+    - 新增浏览器免费语音输入（口述发言）与发言朗读（含气泡跟随），代入感更强。
+  - 风险或阻塞：
+    - 麦克风录音与 `speechSynthesis` 需真人在页面交互授权，无法自动化验证；已做静态与接口层验证。
+    - 语音朗读依赖浏览器内置中文语音，不同系统音色/可用性不一；无中文语音时回退默认。
+    - ASR 复用 mimo key，与 LLM 同一批 key 的有效期风险相同。
+
 ## 审查

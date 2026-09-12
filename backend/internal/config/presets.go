@@ -9,7 +9,22 @@ import (
 )
 
 type PresetFile struct {
-	Presets []Preset `yaml:"presets"`
+	Presets []Preset  `yaml:"presets"`
+	ASR     ASRConfig `yaml:"asr"`
+}
+
+// ASRConfig 是语音转写（OpenAI 兼容 chat/completions + input_audio）的配置。
+// 参考 /Users/bytedance/self/voice2text 的 mimo provider：走 chat/completions，
+// 音频以 wav base64 塞进 input_audio。
+type ASRConfig struct {
+	Endpoint string `yaml:"endpoint,omitempty" json:"endpoint,omitempty"`
+	Token    string `yaml:"token,omitempty" json:"-"`
+	Model    string `yaml:"model,omitempty" json:"model,omitempty"`
+	Language string `yaml:"language,omitempty" json:"language,omitempty"`
+}
+
+func (a ASRConfig) Enabled() bool {
+	return strings.TrimSpace(a.Endpoint) != "" && strings.TrimSpace(a.Token) != "" && strings.TrimSpace(a.Model) != ""
 }
 
 type Preset struct {
@@ -73,6 +88,28 @@ func LoadPresets(path string) ([]Preset, error) {
 		seen[preset.ID] = struct{}{}
 	}
 	return file.Presets, nil
+}
+
+// LoadASR 从同一份 presets yaml 里读取可选的 asr 块。文件不存在或没有 asr
+// 块时返回一个未启用的空配置，调用方用 Enabled() 判断是否开启语音。
+func LoadASR(path string) (ASRConfig, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return ASRConfig{}, nil
+		}
+		return ASRConfig{}, fmt.Errorf("read presets: %w", err)
+	}
+	var file PresetFile
+	if err := yaml.Unmarshal(data, &file); err != nil {
+		return ASRConfig{}, fmt.Errorf("parse presets yaml: %w", err)
+	}
+	asr := file.ASR
+	asr.Endpoint = strings.TrimSpace(asr.Endpoint)
+	asr.Token = strings.TrimSpace(asr.Token)
+	asr.Model = strings.TrimSpace(asr.Model)
+	asr.Language = strings.TrimSpace(asr.Language)
+	return asr, nil
 }
 
 func (p Preset) UsesLLM() bool {

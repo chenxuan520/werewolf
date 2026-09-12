@@ -1,4 +1,4 @@
-import type { ActionPayload, ControlPayload, CreateGamePayload, Preset, RecordSummary, ReplayDetail, Snapshot, Template } from './types'
+import type { ActionPayload, ControlPayload, CreateGamePayload, Preset, PresetProbe, RecordSummary, ReplayDetail, Snapshot, Template } from './types'
 
 async function parseJSON<T>(response: Response): Promise<T> {
   if (!response.ok) {
@@ -18,6 +18,27 @@ export async function fetchPresets(): Promise<Preset[]> {
   const response = await fetch('/api/presets')
   const payload = await parseJSON<{ presets: Preset[] }>(response)
   return payload.presets
+}
+
+export async function probePresets(): Promise<PresetProbe[]> {
+  const response = await fetch('/api/presets/probe', { method: 'POST' })
+  const payload = await parseJSON<{ probes: PresetProbe[] }>(response)
+  return payload.probes
+}
+
+export async function fetchCapabilities(): Promise<{ voiceInput: boolean }> {
+  const response = await fetch('/api/capabilities')
+  return parseJSON<{ voiceInput: boolean }>(response)
+}
+
+export async function transcribeAudio(audioBase64: string): Promise<string> {
+  const response = await fetch('/api/transcribe', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ audio: audioBase64 }),
+  })
+  const payload = await parseJSON<{ text: string }>(response)
+  return payload.text
 }
 
 export async function createGame(payload: CreateGamePayload): Promise<Snapshot> {
